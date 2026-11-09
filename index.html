@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UNAB - Monitor MQTT - Grupo 9</title>
+  <script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#f3f6fb;color:#202a3b;font-family:system-ui,Segoe UI,Arial,sans-serif}
+    header{background:#1f2a44;color:white;padding:22px 28px}header h1{margin:0;font-size:24px}header p{margin:7px 0 0;color:#cbd5e1}
+    main{max-width:1100px;margin:auto;padding:22px}.panel{background:white;border-radius:12px;padding:20px;margin-bottom:18px;box-shadow:0 2px 9px #1f2a4410}
+    .controls{display:flex;gap:12px;flex-wrap:wrap;align-items:end}label{font-size:13px;display:flex;flex-direction:column;gap:5px;color:#526078}
+    input{border:1px solid #cbd5e1;border-radius:7px;padding:9px;font-size:14px;max-width:100%}button{border:0;border-radius:7px;padding:10px 16px;background:#326be6;color:white;cursor:pointer;font-weight:600}button.secondary{background:#667085}
+    #status{font-size:14px;font-weight:600;color:#7b8497}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px;margin-bottom:18px}
+    .card{background:white;border-radius:12px;padding:22px;border-left:5px solid #326be6;box-shadow:0 2px 9px #1f2a4410}.card.humidity{border-left-color:#13a2a2}
+    .card .label{font-size:14px;color:#5f6b7c}.value{font-size:40px;font-weight:750;margin:8px 0}.hint{font-size:12px;color:#64748b}canvas{width:100%!important;max-height:290px}#log{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,Consolas,monospace;max-height:170px;overflow:auto;color:#475569}
+  </style>
+</head>
+<body>
+  <header><h1>UNAB | Monitor MQTT - Grupo 9</h1><p>Temperatura y humedad en tiempo real · CBOX / EMQX / GitHub Pages</p></header>
+  <main>
+    <section class="panel controls">
+      <label>Broker WebSocket seguro<input id="url" size="32" value="wss://broker.emqx.io:8084/mqtt"></label>
+      <label>Tópico MQTT<input id="topic" size="26" value="Grupo9/UNAB/Datos"></label>
+      <button id="connect">Conectar</button><button id="simulate" class="secondary">Simular datos</button>
+      <span id="status">Desconectado</span>
+    </section>
+    <section class="cards">
+      <div class="card"><div class="label">🌡️ Temperatura</div><div class="value" id="temp">-- °C</div><div class="hint" id="tempTime">Sin lecturas</div></div>
+      <div class="card humidity"><div class="label">💧 Humedad</div><div class="value" id="hum">-- %</div><div class="hint" id="humTime">Sin lecturas</div></div>
+    </section>
+    <section class="panel"><canvas id="temperatureChart"></canvas></section>
+    <section class="panel"><canvas id="humidityChart"></canvas></section>
+    <section class="panel"><strong>Mensajes recibidos</strong><div id="log">Esperando datos...</div></section>
+  </main>
+<script>
+  const $ = id => document.getElementById(id);
+  let client = null, simulation = null;
+  const chart = (id, name, color) => new Chart($(id), {
+    type:'line',data:{labels:[],datasets:[{label:name,data:[],borderColor:color,backgroundColor:color,tension:0.3,pointRadius:2}]},
+    options:{responsive:true,animation:false,plugins:{legend:{position:'bottom'}},scales:{y:{beginAtZero:false}}}
+  });
+  const temperatureChart = chart('temperatureChart','Temperatura (°C)','#326be6');
+  const humidityChart = chart('humidityChart','Humedad (%)','#13a2a2');
+  function addPoint(c, value, time){c.data.labels.push(time);c.data.datasets[0].data.push(value);if(c.data.labels.length>60){c.data.labels.shift();c.data.datasets[0].data.shift()}c.update('none')}
+  function receive(topic,payload,isSimulated=false){
+    let o;try{o=typeof payload==='string'?JSON.parse(payload):payload}catch{return}
+    if(!o||typeof o!=='object')return;
+    const lower=Object.fromEntries(Object.entries(o).map(([k,v])=>[k.toLowerCase(),v]));
+    const rawT=lower.temperatura??lower.temp1??lower.temp;
+    const rawH=lower.humedad??lower.hume1??lower.hume;
+    const t=Number(rawT),h=Number(rawH),now=new Date().toLocaleTimeString('es-CL');
+    if(rawT!=null&&Number.isFinite(t)){$('temp').textContent=(t/10).toFixed(1)+' °C';$('tempTime').textContent='Última lectura: '+now;addPoint(temperatureChart,t/10,now)}
+    if(rawH!=null&&Number.isFinite(h)){$('hum').textContent=(h/10).toFixed(1)+' %';$('humTime').textContent='Última lectura: '+now;addPoint(humidityChart,h/10,now)}
+    $('log').textContent=`${now} ${isSimulated?'[SIMULADO] ':''}${topic} ${JSON.stringify(o)}\n`+$('log').textContent.slice(0,4500);
+  }
+  $('connect').onclick=()=>{
+    if(client){client.end(true);client=null;$('connect').textContent='Conectar';$('status').textContent='Desconectado';return}
+    if(typeof mqtt==='undefined'){$('status').textContent='No se cargó la biblioteca MQTT';return}
+    const url=$('url').value.trim(),topic=$('topic').value.trim();
+    $('status').textContent='Conectando...';
+    client=mqtt.connect(url,{clientId:'unab_grupo9_'+Math.random().toString(16).slice(2),clean:true,reconnectPeriod:3000,connectTimeout:10000});
+    client.on('connect',()=>client.subscribe(topic,{qos:0},err=>{$('status').textContent=err?'Error al suscribirse':'Conectado a '+topic}));
+    client.on('message',(t,m)=>receive(t,m.toString()));
+    client.on('error',e=>{$('status').textContent='Error: '+e.message});
+    client.on('close',()=>{if(client)$('status').textContent='Reconectando...'});
+    $('connect').textContent='Desconectar';
+  };
+  $('simulate').onclick=()=>{
+    if(simulation){clearInterval(simulation);simulation=null;$('simulate').textContent='Simular datos';return}
+    $('simulate').textContent='Detener simulación';
+    const generate=()=>receive('Grupo9/UNAB/Datos',{Temperatura:Math.round(266+(Math.random()-.5)*14),Humedad:Math.round(461+(Math.random()-.5)*24)},true);
+    generate();simulation=setInterval(generate,3000);
+  };
+  $('connect').click();
+</script>
+</body>
+</html>
